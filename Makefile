@@ -2,10 +2,12 @@
 ifneq ($(OS), Windows_NT)
 	ARCH := $(shell uname -m)
 	UNAME_S := $(shell uname -s)
+	LIBC ?= $(shell ldd 2>&1 | grep -o musl | head -n1)
 else
 	# We can assume, if in windows it will likely be in x86_64
 	ARCH := x86_64
-	UNAME_S := 
+	UNAME_S :=
+	LIBC ?=
 endif
 
 # Which compilers we build. These have dependencies that may not be on the system.
@@ -38,14 +40,21 @@ ifeq ($(ARCH), x86_64)
 	test_compilers_engines += cranelift-jit
 	# LLVM could be enabled if not in Windows
 	ifneq ($(OS), Windows_NT)
-		# Native engine doesn't work on Windows yet.
-		test_compilers_engines += cranelift-native
+		ifneq ($(LIBC), musl)
+			# Native engine doesn't work on Windows and musl yet.
+			test_compilers_engines += cranelift-native
+		endif
 		# Singlepass doesn't work yet on Windows.
 		compilers += singlepass
 		# Singlepass doesn't work with the native engine.
 		test_compilers_engines += singlepass-jit
 		ifneq (, $(findstring llvm,$(compilers)))
-			test_compilers_engines += llvm-jit llvm-native
+			test_compilers_engines += llvm-jit
+
+			ifneq ($(LIBC), musl)
+				# Native engine doesn't work on musl yet.
+				test_compilers_engines += llvm-native
+			endif
 		endif
 	endif
 endif
@@ -79,9 +88,9 @@ compilers := $(filter-out ,$(compilers))
 test_compilers_engines := $(filter-out ,$(test_compilers_engines))
 
 ifneq ($(OS), Windows_NT)
-	bold := $(shell tput bold)
-	green := $(shell tput setaf 2)
-	reset := $(shell tput sgr0)
+	bold := $(shell tput bold 2>/dev/null || echo -n '')
+	green := $(shell tput setaf 2 2>/dev/null || echo -n '')
+	reset := $(shell tput sgr0 2>/dev/null || echo -n '')
 endif
 
 
@@ -89,11 +98,17 @@ compiler_features_spaced := $(foreach compiler,$(compilers),$(compiler))
 compiler_features := --features "$(compiler_features_spaced)"
 
 HOST_TARGET=$(shell rustup show | grep 'Default host: ' | cut -d':' -f2 | tr -d ' ')
+RUSTFLAGS := "-D dead-code -D nonstandard-style -D unused-imports -D unused-mut -D unused-variables -D unused-unsafe -D unreachable-patterns -D bad-style -D improper-ctypes -D unused-allocation -D unused-comparisons -D while-true -D unconditional-recursion -D bare-trait-objects" # TODO: add `-D missing-docs` # TODO: add `-D function_item_references` (not available on Rust 1.47, try when upgrading)
+
+ifneq (, $(LIBC))
+$(info C standard library: $(bold)$(green)$(LIBC)$(reset))
+endif
 
 $(info Host target: $(bold)$(green)$(HOST_TARGET)$(reset))
 $(info Available compilers: $(bold)$(green)${compilers}$(reset))
 $(info Compilers features: $(bold)$(green)${compiler_features}$(reset))
 $(info Available compilers + engines for test: $(bold)$(green)${test_compilers_engines}$(reset))
+$(info RUSTFLAGS: $(bold)$(green)${RUSTFLAGS}$(reset))
 
 
 ############
@@ -403,7 +418,8 @@ endif
 update-testsuite:
 	git subtree pull --prefix tests/wast/spec https://github.com/WebAssembly/testsuite.git master --squash
 
-RUSTFLAGS := "-D dead-code -D nonstandard-style -D unused-imports -D unused-mut -D unused-variables -D unused-unsafe -D unreachable-patterns -D bad-style -D improper-ctypes -D unused-allocation -D unused-comparisons -D while-true -D unconditional-recursion -D bare-trait-objects" # TODO: add `-D missing-docs` # TODO: add `-D function_item_references` (not available on Rust 1.47, try when upgrading)
+ # TODO: add `-D missing-docs`
+ # TODO: add `-D function_item_references` (not available on Rust 1.47, try when upgrading)
 lint-packages:
 	RUSTFLAGS=${RUSTFLAGS} cargo clippy -p wasmer
 	RUSTFLAGS=${RUSTFLAGS} cargo clippy -p wasmer-c-api

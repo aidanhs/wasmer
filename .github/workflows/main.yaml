@@ -32,41 +32,47 @@ jobs:
           echo $DOING_RELEASE
 
   test:
-    name: Test on ${{ matrix.build }}
+    name: Test on ${{ matrix.id }}
     runs-on: ${{ matrix.os }}
     needs: setup
     strategy:
       fail-fast: false
       matrix:
-        build: [linux-x64, macos-x64, macos-arm64, windows-x64, linux-aarch64]
         include:
-          - build: linux-x64
+          - id: linux-x64
             os: ubuntu-18.04
             rust: 1.48
             llvm_url: 'https://github.com/wasmerio/llvm-custom-builds/releases/download/10.x/linux-amd64.tar.gz'
             artifact_name: 'wasmer-linux-amd64'
             cross_compilation_artifact_name: 'cross_compiled_from_linux'
             run_integration_tests: true
-          - build: macos-x64
+          - id: linux-musl-x64
+            os: ubuntu-18.04
+            rust: 1.48
+            target: x86_64-unknown-linux-musl
+            artifact_name: 'wasmer-linux-musl-amd64'
+            cross_compilation_artifact_name: 'cross_compiled_from_linux'
+            run_integration_tests: false
+          - id: macos-x64
             os: macos-latest
             rust: 1.48
             llvm_url: 'https://github.com/wasmerio/llvm-custom-builds/releases/download/10.x/darwin-amd64.tar.gz'
             artifact_name: 'wasmer-darwin-amd64'
             cross_compilation_artifact_name: 'cross_compiled_from_mac'
             run_integration_tests: true
-          - build: macos-arm64
+          - id: macos-arm64
             os: macos-11.0
             rust: 1.49
             target: aarch64-apple-darwin
             artifact_name: 'wasmer-darwin-arm64'
-          - build: windows-x64
+          - id: windows-x64
             os: windows-latest
             rust: 1.48
             # llvm_url: 'https://github.com/wasmerio/llvm-custom-builds/releases/download/10.x/windows-amd64.tar.gz'
             artifact_name: 'wasmer-windows-amd64'
             cross_compilation_artifact_name: 'cross_compiled_from_win'
             run_integration_tests: true
-          - build: linux-aarch64
+          - id: linux-aarch64
             os: [self-hosted, linux, ARM64]
             random_sccache_port: true
             rust: 1.48
@@ -80,11 +86,16 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Set up libstdc++ on Linux
+        if: matrix.id == 'linux-x64'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --allow-downgrades libstdc++6=8.4.0-1ubuntu1~18.04
           sudo apt-get install --reinstall g++-8
-        if: matrix.os == 'ubuntu-18.04'
+      - name: Set up musl on Linux
+        if: matrix.id == 'linux-musl-x64'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y musl-dev musl-tools
       - name: Install Rust ${{ matrix.rust }}
         uses: actions-rs/toolchain@v1
         with:
@@ -92,7 +103,7 @@ jobs:
           target: ${{ matrix.target }}
           override: true
       - name: Install LLVM (Windows)
-        if: matrix.os == 'windows-latest' && !matrix.llvm_url
+        if: matrix.id == 'windows-x64' && !matrix.llvm_url
         shell: cmd
         run: |
           choco install llvm
@@ -112,23 +123,22 @@ jobs:
         env:
           LLVM_DIR: ${{ github.workspace }}/llvm-10
       - name: Set up dependencies for Mac OS
+        if: matrix.id == 'macos-x64' || matrix.id == 'macos-arm64'
         run: |
           brew install automake
           # using gnu-tar is a workaround for https://github.com/actions/cache/issues/403
           brew install gnu-tar
           echo PATH="/usr/local/opt/gnu-tar/libexec/gnubin:$PATH" >> $GITHUB_ENV
-        if: matrix.os == 'macos-latest' || matrix.os == 'macos-11.0'
       - uses: actions/cache@v2
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ matrix.build }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}-v1
-      # Install sccache
+          key: ${{ matrix.id }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}-v1
       - uses: actions/cache@v2
         with:
           path: ${{ runner.tool_cache }}/cargo-sccache
-          key: ${{ matrix.build }}-${{ matrix.target }}-sccache-bin-${{ env.CARGO_SCCACHE_VERSION }}-v1
+          key: ${{ matrix.id }}-${{ matrix.target }}-sccache-bin-${{ env.CARGO_SCCACHE_VERSION }}-v1
       - name: Install sccache
         run: |
           if [ ! -f ${{ runner.tool_cache }}/cargo-sccache/bin/sccache ]; then
@@ -136,13 +146,14 @@ jobs:
           fi
         shell: bash
       - name: Setup Rust target
+        if: matrix.target
         run: |
           cat << EOF > .cargo/config.toml
           [build]
           target = "${{ matrix.target }}"
           EOF
-        if: matrix.target
       - name: Set sccache port
+        if: matrix.random_sccache_port
         run: |
           netstat -aln | awk '
             $6 == "LISTEN" {
@@ -160,7 +171,6 @@ jobs:
           ' >> $GITHUB_ENV
           # echo "SCCACHE_SERVER_PORT=9000"
           echo "Setting random sccache port to: $SCCACHE_SERVER_PORT"
-        if: matrix.random_sccache_port
         shell: bash
       - name: Start sccache
         run: |
@@ -169,28 +179,37 @@ jobs:
           ${{ runner.tool_cache }}/cargo-sccache/bin/sccache -s
           echo "RUSTC_WRAPPER=${{ runner.tool_cache }}/cargo-sccache/bin/sccache" >> $GITHUB_ENV
       - name: Test
+        if: matrix.id != 'macos-arm64' && matrix.id != 'linux-musl-x64'
         run: |
           make test
-        if: matrix.target != 'aarch64-apple-darwin'
+      - name: Test (musl)
+        if: matrix.id == 'linux-musl-x64'
+        run: |
+          LIBC=musl WASMER_CAPI_USE_SYSTEM_LIBFFI=1 make test
       - name: Test C API
+        if: matrix.id != 'windows-x64' && matrix.id != 'macos-arm64' && matrix.id != 'linux-musl-x64' # we can't test yet on Apple Silicon or Windows
         run: |
           make test-capi
-        if: matrix.os != 'windows-latest' && matrix.target != 'aarch64-apple-darwin' # we can't test yet on Apple Silicon or Windows
       - name: Build C API
+        if: matrix.id != 'macos-arm64' && matrix.id != 'linux-musl-x64'
         run: |
           make build-capi
-        if: matrix.target != 'aarch64-apple-darwin'
       - name: Build C API (system libffi)
+        if: matrix.id != 'macos-arm64'
         run: |
           make build-capi-cranelift-system-libffi
-        if: matrix.target == 'aarch64-apple-darwin'
       - name: Build Wasmer binary
+        if: matrix.id != 'linux-musl-x64'
         run: |
           make build-wasmer
+      - name: Build Wasmer binary (musl)
+        if: matrix.id == 'linux-musl-x64'
+        run: |
+          LIBC=musl WASMER_CAPI_USE_SYSTEM_LIBFFI=1 make build-wasmer
       - name: Build Wapm binary
+        if: needs.setup.outputs.DOING_RELEASE == '1'
         run: |
           make build-wapm
-        if: needs.setup.outputs.DOING_RELEASE == '1'
       - name: Install Nightly Rust for Headless
         uses: actions-rs/toolchain@v1
         with:
@@ -206,6 +225,7 @@ jobs:
           make build-wasmer-headless-minimal
         if: needs.setup.outputs.DOING_RELEASE == '1'
       - name: Copy target binaries
+        if: matrix.target
         run: |
           mkdir -p target/release
           cp target/${{matrix.target}}/release/wasmer* target/release
@@ -214,24 +234,23 @@ jobs:
             mkdir -p wapm-cli/target/release 
             cp wapm-cli/target/${{matrix.target}}/release/wapm* wapm-cli/target/release
           fi
-        if: matrix.target
       - name: Dist
         run: |
           make distribution
       - name: Run integration tests (Windows)
+        if: matrix.run_integration_tests && matrix.id == 'windows-x64'
         shell: cmd
         run: |
           call refreshenv
           set WASMER_DIR=%CD%\package
           make test-integration
-        if: matrix.run_integration_tests && matrix.os == 'windows-latest'
       - name: Run integration tests (Unix)
+        if: matrix.run_integration_tests && matrix.id != 'windows-x64'
         run: |
           export WASMER_DIR=`pwd`/package
           make test-integration
-        if: matrix.run_integration_tests && matrix.os != 'windows-latest'
       - name: Cross compile from Linux
-        if: matrix.os == 'ubuntu-18.04'
+        if: matrix.id == 'linux-x64'
         shell: bash
         run: |
           ls target/release
@@ -243,7 +262,7 @@ jobs:
           #cp qjs_win_from_linux.wjit cross
           cp target/release/wasmer cross
       - name: Cross compile from Mac
-        if: matrix.os == 'macos-latest'
+        if: matrix.id == 'macos-x64'
         shell: bash
         run: |
           ls target/release
@@ -255,7 +274,7 @@ jobs:
           #cp qjs_win_from_mac.wjit cross
           cp target/release/wasmer cross
       #- name: Cross compile from Windows
-      #  if: matrix.os == 'windows-latest'
+      #  if: matrix.id == 'windows-x64'
       #  shell: bash
       #  run: |
       #    alias wasmer=target/release/wasmer
